@@ -16,15 +16,13 @@ print '*'*150
 print 'Testing module at location:', pysd.__file__
 
 
-class Test_Vensim_Importer(unittest.TestCase):
+class Test_Model_Object_Creation(unittest.TestCase):
     """ Test Import functionality """
-    @classmethod
-    def setUpClass(cls):
-        cls.model = pysd.read_vensim('tests/old_tests/vensim/Teacup.mdl')
 
-    @unittest.skip("in development")
-    def test_documentation(self):
-        self.assertIsInstance(self.model.components.doc(), basestring)
+    def test_read_vensim(self):
+        model = pysd.read_vensim('tests/old_tests/vensim/Teacup.mdl')
+        self.assertTrue(isinstance(model, pysd.PySD))
+
 
 
 class Test_PySD(unittest.TestCase):

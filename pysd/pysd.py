@@ -12,15 +12,14 @@ import translators as _translators
 import pandas as _pd
 import numpy as np
 import imp
+from numba import jit
 
-######################################################
-# Todo:
-# - Check that having the init be a function attribute is ok, because sometimes it will be a function,
+
+# Todo: Check that having the init be a function attribute is ok, because sometimes it will be a function,
 #       and we may not be ready to run the function at import time.
-# - passing optional arguments in the run command through to the integrator,
-#       to give a finer level of control to those who know what to do with them. (such as `tcrit`)
-# - add a logical way to run two or more models together, using the same integrator.
-# - import translators within read_XMILE and read_Vensim, so we don't load both if we dont need them
+#
+# Todo: add a logical way to run two or more models together, using the same integrator.
+# Todo: import translators within read_XMILE and read_Vensim, so we don't load both if we dont need them
 
 ######################################################
 
@@ -57,15 +56,18 @@ def read_vensim(mdl_file):
     model = load(py_model_file)
     model.__str__ = 'Import of ' + mdl_file
     return model
-#read_vensim.__doc__ += _translators.translate_vensim.__doc__
+
 
 def load(py_model_file):
     """ Load a python-converted model file. """
     components = imp.load_source('modulename', py_model_file)
     components._stocknames = [name for name in dir(components) if hasattr(getattr(components, name), 'init')]
     components._dfuncs = {name: getattr(components, 'd%s_dt'%name) for name in components._stocknames}
-    funcnames = filter(lambda x: not x.startswith('_'), dir(components))
-    components._funcs = {name: getattr(components, name) for name in funcnames}
+
+    isfunc = lambda x: not x.startswith('_') and hasattr(getattr(components, x) , '__call__')
+    funcnames = filter(isfunc, dir(components))
+    components._funcs = {name: jit(getattr(components, name)) for name in funcnames}
+
     model = PySD(components)
     model.__str__ = 'Import of ' + py_model_file
     return model
@@ -318,13 +320,14 @@ class PySD(object):
         """ Internal function for creating a constant model element """
         return lambda: value
 
-
+    @jit
     def _step(self, ddt, state, dt):
         outdict = {}
         for key in ddt:
             outdict[key] = ddt[key]()*dt + state[key]
         return outdict
 
+    @jit
     def _integrate(self, ddt, timesteps, return_elements):
         outputs = range(len(timesteps))
         for i, t2 in enumerate(timesteps):

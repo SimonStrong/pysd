@@ -5,10 +5,10 @@ version 0.2.5
 James Houghton <james.p.houghton@gmail.com>
 '''
 
-#pysd specific imports
+# pysd specific imports
 import translators as _translators
 
-#third party imports
+# third party imports
 import pandas as _pd
 import numpy as np
 import imp
@@ -48,7 +48,10 @@ def read_xmile(xmile_file):
     model = load(py_model_file)
     model.__str__ = 'Import of ' + xmile_file
     return model
+
+
 read_xmile.__doc__ += _translators.translate_xmile.__doc__
+
 
 def read_vensim(mdl_file):
     """ Construct a model from Vensim `.mdl` file. """
@@ -58,15 +61,43 @@ def read_vensim(mdl_file):
     return model
 
 
+
+
+
 def load(py_model_file):
     """ Load a python-converted model file. """
     components = imp.load_source('modulename', py_model_file)
     components._stocknames = [name for name in dir(components) if hasattr(getattr(components, name), 'init')]
-    components._dfuncs = {name: getattr(components, 'd%s_dt'%name) for name in components._stocknames}
+    components._dfuncs = {name: getattr(components, 'd%s_dt' % name) for name in components._stocknames}
 
-    isfunc = lambda x: not x.startswith('_') and hasattr(getattr(components, x) , '__call__')
+    isfunc = lambda x: not x.startswith('_') and hasattr(getattr(components, x), '__call__')
     funcnames = filter(isfunc, dir(components))
-    components._funcs = {name: jit(getattr(components, name)) for name in funcnames}
+
+    # apply the @JIT to all functions
+    [setattr(components, f, jit(getattr(components, f))) for f in funcnames]
+    components._funcs = {name: getattr(components, name) for name in funcnames}
+
+    @jit
+    def _step(dt):
+        newstate = {}
+        for key in components._stocknames:
+            newstate[key] = components._dfuncs[key]() * dt + components.state[key]
+        components.state = newstate
+        components.t = components.t+dt
+
+    @jit()
+    def _integrate(timesteps, return_elements):
+        outputs = range(len(timesteps))
+        for i, t2 in enumerate(timesteps):
+            _step(t2 - components.t)
+            outdict = {}
+            for key in return_elements:
+                outdict[key] = components._funcs[key]()
+            outputs[i] = outdict
+        return outputs
+
+    setattr(components, '_step', _step)
+    setattr(components, '_integrate', _integrate)
 
     model = PySD(components)
     model.__str__ = 'Import of ' + py_model_file
@@ -164,7 +195,7 @@ class PySD(object):
             tseries = np.insert(tseries, 0, self.components.t)
 
         if self.components._stocknames:
-            #res = _odeint(func=self.components.d_dt,
+            # res = _odeint(func=self.components.d_dt,
             #              y0=self.components.get_state(),
             #              t=tseries,
             #              **intg_kwargs)
@@ -173,11 +204,11 @@ class PySD(object):
             if not return_columns:
                 return_columns = self.components._stocknames
 
-            res = self._integrate(self.components._dfuncs, tseries, return_columns)
+            res = self.components._integrate(tseries, return_columns)
 
             return_df = _pd.DataFrame(data=res,
-                                     index=tseries,
-                                     columns=return_columns)#,
+                                      index=tseries,
+                                      columns=return_columns)  # ,
 
         else:
             for key in return_elements:
@@ -188,26 +219,25 @@ class PySD(object):
             return_df.drop(return_df.index[0], inplace=True)
 
         if collect:
-            self.record.append(return_df) #we could just record the state, and expand it later...
+            self.record.append(return_df)  # we could just record the state, and expand it later...
 
         return return_df
 
     def reset_state(self):
-            """Sets the model state to the state described in the model file. """
-            self.components.t = self.components.initial_time() #set the initial time
-            self.components.state = {}
-            retry_flag = False
-            for key in self.components._stocknames:
-                try:
-                    # We have to do a loop here because there are cases where the initialization will
-                    # call a function, and that function may not have its own initial conditions defined
-                    # just yet.
-                    self.components.state[key] = getattr(self.components, key).init #set the initial state
-                except TypeError:
-                    retry_flag = True
-            if retry_flag:
-                self.reset_state() #potential for infinite loop!
-
+        """Sets the model state to the state described in the model file. """
+        self.components.t = self.components.initial_time()  # set the initial time
+        self.components.state = {}
+        retry_flag = False
+        for key in self.components._stocknames:
+            try:
+                # We have to do a loop here because there are cases where the initialization will
+                # call a function, and that function may not have its own initial conditions defined
+                # just yet.
+                self.components.state[key] = getattr(self.components, key).init  # set the initial state
+            except TypeError:
+                retry_flag = True
+        if retry_flag:
+            self.reset_state()  # potential for infinite loop!
 
     def get_record(self):
         """ Return the recorded model information.
@@ -217,14 +247,12 @@ class PySD(object):
         """
         return _pd.concat(self.record)
 
-
     def clear_record(self):
         """ Reset the recorder.
 
         >>> model.clear_record()
         """
         self.record = []
-
 
     def set_components(self, params):
         """ Set the value of exogenous model elements.
@@ -243,11 +271,10 @@ class PySD(object):
         for key, value in params.iteritems():
             if isinstance(value, _pd.Series):
                 updates_dict[key] = self._timeseries_component(value)
-            else: #could check here for valid value...
+            else:  # could check here for valid value...
                 updates_dict[key] = self._constant_component(value)
 
         self.components.__dict__.update(updates_dict)
-
 
     def set_state(self, t, state):
         """ Set the system state.
@@ -262,7 +289,6 @@ class PySD(object):
         """
         self.components.t = t
         self.components.state.update(state)
-
 
     def set_initial_condition(self, initial_condition):
         """ Set the initial conditions of the integration.
@@ -283,7 +309,7 @@ class PySD(object):
         """
 
         if isinstance(initial_condition, tuple):
-            #we should probably check the values more than just seeing if they are a tuple.
+            # we should probably check the values more than just seeing if they are a tuple.
             self.set_state(*initial_condition)
         elif isinstance(initial_condition, str):
             if initial_condition.lower() in ['original', 'o']:
@@ -291,12 +317,11 @@ class PySD(object):
             elif initial_condition.lower() in ['current', 'c']:
                 pass
             else:
-                raise ValueError('Valid initial condition strings include:  \n'+
-                                 '    "original"/"o",                       \n'+
+                raise ValueError('Valid initial condition strings include:  \n' +
+                                 '    "original"/"o",                       \n' +
                                  '    "current"/"c"')
         else:
             raise TypeError('Check documentation for valid entries')
-
 
     def _build_timeseries(self, return_timestamps):
         """ Build up array of timestamps """
@@ -310,8 +335,7 @@ class PySD(object):
             raise TypeError('`return_timestamps` expects a list, array, or numeric value')
         return tseries
 
-
-    #these could be better off in a model creation class
+    # these could be better off in a model creation class
     def _timeseries_component(self, series):
         """ Internal function for creating a timeseries model element """
         return lambda: np.interp(self.components.t, series.index, series.values)
@@ -320,22 +344,24 @@ class PySD(object):
         """ Internal function for creating a constant model element """
         return lambda: value
 
-    @jit
-    def _step(self, ddt, state, dt):
-        outdict = {}
-        for key in ddt:
-            outdict[key] = ddt[key]()*dt + state[key]
-        return outdict
-
-    @jit
-    def _integrate(self, ddt, timesteps, return_elements):
-        outputs = range(len(timesteps))
-        for i, t2 in enumerate(timesteps):
-            self.components.state = self._step(ddt, self.components.state, t2-self.components.t)
-            self.components.t = t2
-            outdict = {}
-            for key in return_elements:
-                outdict[key] = self.components._funcs[key]()
-            outputs[i] = outdict
-
-        return outputs
+#
+# @jit
+# def _step(ddt, state, dt):
+#     outdict = {}
+#     for key in ddt:
+#         outdict[key] = ddt[key]() * dt + state[key]
+#     return outdict
+#
+#
+# @jit(nopython=True)
+# def _integrate(components, ddt, timesteps, return_elements):
+#     outputs = range(len(timesteps))
+#     for i, t2 in enumerate(timesteps):
+#         components.state = components._step(ddt, components.state, t2 - components.t)
+#         components.t = t2
+#         outdict = {}
+#         for key in return_elements:
+#             outdict[key] = components._funcs[key]()
+#         outputs[i] = outdict
+#
+#     return outputs

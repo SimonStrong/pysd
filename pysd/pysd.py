@@ -9,17 +9,19 @@ James Houghton <james.p.houghton@gmail.com>
 import translators as _translators
 
 #third party imports
-from scipy.integrate import odeint as _odeint
 import pandas as _pd
 import numpy as np
 import imp
 
 ######################################################
 # Todo:
+# - Check that having the init be a function attribute is ok, because sometimes it will be a function,
+#       and we may not be ready to run the function at import time.
 # - passing optional arguments in the run command through to the integrator,
 #       to give a finer level of control to those who know what to do with them. (such as `tcrit`)
 # - add a logical way to run two or more models together, using the same integrator.
 # - import translators within read_XMILE and read_Vensim, so we don't load both if we dont need them
+
 ######################################################
 
 
@@ -55,13 +57,16 @@ def read_vensim(mdl_file):
     model = load(py_model_file)
     model.__str__ = 'Import of ' + mdl_file
     return model
-read_vensim.__doc__ += _translators.translate_vensim.__doc__
+#read_vensim.__doc__ += _translators.translate_vensim.__doc__
 
 def load(py_model_file):
     """ Load a python-converted model file. """
-    module = imp.load_source('modulename', py_model_file)
-    component_class = module.Components
-    model = PySD(component_class)
+    components = imp.load_source('modulename', py_model_file)
+    components._stocknames = [name for name in dir(components) if hasattr(getattr(components, name), 'init')]
+    components._dfuncs = {name: getattr(components, 'd%s_dt'%name) for name in components._stocknames}
+    funcnames = filter(lambda x: not x.startswith('_'), dir(components))
+    components._funcs = {name: getattr(components, name) for name in funcnames}
+    model = PySD(components)
     model.__str__ = 'Import of ' + py_model_file
     return model
 
@@ -75,9 +80,9 @@ class PySD(object):
         The import functions pull models and create this class.
     """
 
-    def __init__(self, component_class):
+    def __init__(self, components):
         """ Construct a PySD object built around the component class """
-        self.components = component_class()
+        self.components = components
         self.record = []
 
     def __str__(self):
@@ -142,9 +147,6 @@ class PySD(object):
 
         """
 
-        #if not self.components._stocknames:
-            #raise RuntimeError('Cannnot integrate no-stock models.')
-
         if params:
             self.set_components(params)
 
@@ -160,19 +162,25 @@ class PySD(object):
             tseries = np.insert(tseries, 0, self.components.t)
 
         if self.components._stocknames:
-            res = _odeint(func=self.components.d_dt,
-                          y0=self.components.state_vector(),
-                          t=tseries,
-                          **intg_kwargs)
-                          #hmax=self.components.time_step())
+            #res = _odeint(func=self.components.d_dt,
+            #              y0=self.components.get_state(),
+            #              t=tseries,
+            #              **intg_kwargs)
+            #              #hmax=self.components.time_step())
 
-            state_df = _pd.DataFrame(data=res,
+            if not return_columns:
+                return_columns = self.components._stocknames
+
+            res = self._integrate(self.components._dfuncs, tseries, return_columns)
+
+            return_df = _pd.DataFrame(data=res,
                                      index=tseries,
-                                     columns=self.components._stocknames)
-        else:
-            state_df = _pd.DataFrame(index=tseries, data=1, columns=['dummy'])
+                                     columns=return_columns)#,
 
-        return_df = self.extend_dataframe(state_df, return_columns) if return_columns else state_df
+        else:
+            for key in return_elements:
+                outdict[key] = self.components._funcs[key]()
+            return_df = _pd.DataFrame(index=tseries, data=outdict)
 
         if addtflag:
             return_df.drop(return_df.index[0], inplace=True)
@@ -180,21 +188,33 @@ class PySD(object):
         if collect:
             self.record.append(return_df) #we could just record the state, and expand it later...
 
-        # The integrator takes us past the last point in the tseries.
-        # Go back to it, in order to maintain the state at a predictable location.
-        # This may take up more time than we're willing to spend...
-        if self.components.t != tseries[-1]:
-            self.set_state(tseries[-1], dict(state_df.iloc[-1]))
-
         return return_df
+
+    def reset_state(self):
+            """Sets the model state to the state described in the model file. """
+            self.components.t = self.components.initial_time() #set the initial time
+            self.components.state = {}
+            retry_flag = False
+            for key in self.components._stocknames:
+                try:
+                    # We have to do a loop here because there are cases where the initialization will
+                    # call a function, and that function may not have its own initial conditions defined
+                    # just yet.
+                    self.components.state[key] = getattr(self.components, key).init #set the initial state
+                except TypeError:
+                    retry_flag = True
+            if retry_flag:
+                self.reset_state() #potential for infinite loop!
 
 
     def get_record(self):
         """ Return the recorded model information.
+        Returns everything as a big long dataframe.
 
         >>> model.get_record()
         """
         return _pd.concat(self.record)
+
 
     def clear_record(self):
         """ Reset the recorder.
@@ -225,29 +245,6 @@ class PySD(object):
                 updates_dict[key] = self._constant_component(value)
 
         self.components.__dict__.update(updates_dict)
-
-    def extend_dataframe(self, state_df, return_columns):
-        """ Calculates model values at given system states
-        This is primarily an internal method used by the run function
-        """
-        #there may be a better way to use the integrator that lets us report
-        #more values than just the stocks. In the meantime, we have to go
-        #through the returned values again, set up the model, and measure them.
-
-        def get_values(row):
-            """ Helper method that lets us use 'apply' below """
-            t = row.name
-            state = dict(row[self.components.state.keys()])
-            self.set_state(t, state)
-
-            return_vals = {}
-            for column in return_columns: #there must be a faster way to do this...
-                func = getattr(self.components, column)
-                return_vals[column] = func()
-
-            return _pd.Series(return_vals)
-
-        return state_df.apply(get_values, axis=1)
 
 
     def set_state(self, t, state):
@@ -288,7 +285,7 @@ class PySD(object):
             self.set_state(*initial_condition)
         elif isinstance(initial_condition, str):
             if initial_condition.lower() in ['original', 'o']:
-                self.components.reset_state()
+                self.reset_state()
             elif initial_condition.lower() in ['current', 'c']:
                 pass
             else:
@@ -322,4 +319,20 @@ class PySD(object):
         return lambda: value
 
 
+    def _step(self, ddt, state, dt):
+        outdict = {}
+        for key in ddt:
+            outdict[key] = ddt[key]()*dt + state[key]
+        return outdict
 
+    def _integrate(self, ddt, timesteps, return_elements):
+        outputs = range(len(timesteps))
+        for i, t2 in enumerate(timesteps):
+            self.components.state = self._step(ddt, self.components.state, t2-self.components.t)
+            self.components.t = t2
+            outdict = {}
+            for key in return_elements:
+                outdict[key] = self.components._funcs[key]()
+            outputs[i] = outdict
+
+        return outputs

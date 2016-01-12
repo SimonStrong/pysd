@@ -211,7 +211,8 @@ class PySD(object):
                                       columns=return_columns)  # ,
 
         else:
-            for key in return_elements:
+            outdict = {}
+            for key in return_columns:
                 outdict[key] = self.components._funcs[key]()
             return_df = _pd.DataFrame(index=tseries, data=outdict)
 

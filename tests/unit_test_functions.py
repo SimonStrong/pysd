@@ -1,6 +1,7 @@
 import unittest
 import numpy as np
 
+
 class TestInputFunctions(unittest.TestCase):
     def test_ramp(self):
         """Test functions.ramp"""
@@ -83,32 +84,33 @@ class TestInputFunctions(unittest.TestCase):
 
     def test_xidz(self):
         from pysd import functions
-        ## functions.time = lambda: 5 ## any time will and should do
-        self.assertEqual(functions.xidz(1,-0.00000001,5),5)
+        # functions.time = lambda: 5 ## any time will and should do
+        self.assertEqual(functions.xidz(1, -0.00000001, 5), 5)
         self.assertEqual(functions.xidz(1, 0, 5), 5)
         self.assertEqual(functions.xidz(1, 8, 5), 0.125)
 
     def test_zidz(self):
         from pysd import functions
-        ## functions.time = lambda: 5 ## any time will and should do
-        self.assertEqual(functions.zidz(1,-0.00000001),0)
+        # functions.time = lambda: 5 ## any time will and should do
+        self.assertEqual(functions.zidz(1, -0.00000001), 0)
         self.assertEqual(functions.zidz(1, 0), 0)
         self.assertEqual(functions.zidz(1, 8), 0.125)
+
 
 class TestStatsFunctions(unittest.TestCase):
     def test_bounded_normal(self):
         from pysd.functions import bounded_normal
-        min = -4
-        max = .2
+        min_val = -4
+        max_val = .2
         mean = -1
         std = .05
         seed = 1
         results = np.array(
-            [bounded_normal(min, max, mean, std, seed)
+            [bounded_normal(min_val, max_val, mean, std, seed)
              for _ in range(1000)])
 
-        self.assertGreaterEqual(results.min(), min)
-        self.assertLessEqual(results.max(), max)
+        self.assertGreaterEqual(results.min(), min_val)
+        self.assertLessEqual(results.max(), max_val)
         self.assertAlmostEqual(results.mean(), mean, delta=std)
         self.assertAlmostEqual(results.std(), std, delta=std)  # this is a pretty loose test
         self.assertGreater(len(np.unique(results)), 100)
@@ -138,7 +140,66 @@ class TestLogicFunctions(unittest.TestCase):
         and the output values are subscripted? """
         self.fail()
 
-class TestDataHandling(unittest.TestCase):
+
+class TestStateful(unittest.TestCase):
+
+    def test_integ(self):
+        import pysd.functions
+
+        ddt_val = 5
+        init_val = 10
+
+        def ddt_func():
+            return ddt_val
+
+        def init_func():
+            return init_val
+
+        stock = pysd.functions.Integ(lambda: ddt_func(),
+                                     lambda: init_func())
+
+        stock.initialize()
+
+        self.assertEqual(stock(), 10)
+        self.assertEqual(stock.ddt(), 5)
+
+        dt = .1
+        stock.update(stock() + dt * stock.ddt())
+
+        self.assertEqual(stock(), 10.5)
+
+        ddt_val = 43
+        self.assertEqual(stock.ddt(), 43)
+
+        init_val = 11
+        self.assertEqual(stock(), 10.5)
+
+        stock.initialize()
+        self.assertEqual(stock(), 11)
+
+    def test_stateful_identification(self):
+        import pysd.functions
+
+        stock = pysd.functions.Integ(lambda: 5,
+                                     lambda: 7)
+
+        self.assertIsInstance(stock,
+                              pysd.functions.Stateful)
+
+    def test_delay(self):
+        import pysd.functions
+
+        delay_a = pysd.functions.Delay(delay_input=lambda: 5,
+                                       delay_time=lambda: 3,
+                                       initial_value=lambda: 4.234,
+                                       order=lambda: 3)
+
+        delay_a.initialize()
+
+        self.assertEqual(delay_a(), 4.234)
+
+        self.assertEqual(delay_a.ddt()[0], 5-(4.234*3/3))
+
     def test_initial(self):
         from pysd import functions
         a = 1
@@ -150,23 +211,33 @@ class TestDataHandling(unittest.TestCase):
         def func2():
             return b
 
+        # test that the function returns the first value
+        # after it is called once
         f1_0 = func1()
-        f1_i0 = functions.initial(func1())
+        initial_f10 = functions.Initial(lambda: func1())
+        initial_f10.initialize()
+        f1_i0 = initial_f10()
         self.assertEqual(f1_0, f1_i0)
 
         f2_0 = func2()
-        f2_i0 = functions.initial(func2())
+        initial_f20 = functions.Initial(func2)
+        initial_f20.initialize()
+        f2_i0 = initial_f20()
         self.assertEqual(f2_0, f2_i0)
 
         a = 5
         b = 6
 
+        # test that the function returns the first value
+        # after it is called a second time
         f1_1 = func1()
-        f1_i1 = functions.initial(func1())
+        f1_i1 = initial_f10()
         self.assertNotEqual(f1_1, f1_i1)
         self.assertEqual(f1_i1, f1_0)
 
         f2_1 = func2()
-        f2_i1 = functions.initial(func2())
+        f2_i1 = initial_f20()
         self.assertNotEqual(f2_1, f2_i1)
         self.assertEqual(f2_i1, f2_0)
+
+

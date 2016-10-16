@@ -1,19 +1,15 @@
 """
-In this version:
-build up construction functions as separate step in model loading
-
-
-Todo:
-
-
+Translates vensim .mdl file to pieces needed by the builder module to write a python version of the
+model. Everything that requires knowledge of vensim syntax should be in this file.
 """
 
 import re
 import parsimonious
-import builder
-import utils
+from . import builder
+from . import utils
 import textwrap
 import numpy as np
+import os
 
 
 def get_file_sections(file_str):
@@ -69,13 +65,17 @@ def get_file_sections(file_str):
             self.entries = []
             self.visit(ast)
 
-        def visit_main(self, n, text):
-            self.entries.append({'name': 'main',
+        def visit_main(self, n, vc):
+            self.entries.append({'name': '_main_',
                                  'params': [],
                                  'returns': [],
                                  'string': n.text.strip()})
 
-        def visit_macro(self, n, (m1, _1, name, _2, lp, _3, params, _4, cn, _5, returns, _6, rp, text, m2)):
+        def visit_macro(self, n, vc):
+            name = vc[2]
+            params = vc[6]
+            returns = vc[10]
+            text = vc[13]
             self.entries.append({'name': name,
                                  'params': [x.strip() for x in params.split(',')] if params else [],
                                  'returns': [x.strip() for x in
@@ -232,20 +232,18 @@ def get_equation_components(equation_str):
 
     name = basic_id / escape_group
     subscriptlist = '[' _ subscript _ ("," _ subscript)* _ ']'
-    expression = ~r".*"  # expression could be anything, at this point. # Todo: should make this regex include newlines
+    expression = ~r".*"  # expression could be anything, at this point.
 
     subscript = basic_id / escape_group
 
     basic_id = ~r"[a-zA-Z][a-zA-Z0-9_\s]*"
     escape_group = "\"" ( "\\\"" / ~r"[^\"]" )* "\""
-    _ = ~r"[\s\\]*" #whitespace character
+    _ = ~r"[\s\\]*"  # whitespace character
     """
 
     # replace any amount of whitespace  with a single space
     equation_str = equation_str.replace('\\t', ' ')
-    #equation_str = equation_str.replace('\\', ' ')
     equation_str = re.sub(r"\s+", ' ', equation_str)
-
 
     parser = parsimonious.Grammar(component_structure_grammar)
     tree = parser.parse(equation_str)
@@ -267,10 +265,12 @@ def get_equation_components(equation_str):
         def visit_component(self, n, vc):
             self.kind = 'component'
 
-        def visit_name(self, n, (name, )):
+        def visit_name(self, n, vc):
+            (name,) = vc
             self.real_name = name.strip()
 
-        def visit_subscript(self, n, (subscript, )):
+        def visit_subscript(self, n, vc):
+            (subscript,) = vc
             self.subscripts.append(subscript.strip())
 
         def visit_expression(self, n, vc):
@@ -314,7 +314,7 @@ def parse_units(units_str):
     return units_str
 
 
-def parse_general_expression(element, namespace=None, subscript_dict=None):
+def parse_general_expression(element, namespace=None, subscript_dict=None, macro_list=None):
     """
     Parses a normal expression
     # its annoying that we have to construct and compile the grammar every time...
@@ -327,6 +327,8 @@ def parse_general_expression(element, namespace=None, subscript_dict=None):
 
     subscript_dict : dictionary
 
+    macro_list: list of dictionaries
+        [{'name': 'M', 'py_name':'m', 'filename':'path/to/file', 'args':['arg1', 'arg2']}]
 
     Returns
     -------
@@ -368,7 +370,8 @@ def parse_general_expression(element, namespace=None, subscript_dict=None):
         "abs": "abs", "integer": "int", "exp": "np.exp", "sin": "np.sin", "cos": "np.cos",
         "sqrt": "np.sqrt", "tan": "np.tan", "lognormal": "np.random.lognormal",
         "random normal": "functions.bounded_normal", "poisson": "np.random.poisson", "ln": "np.log",
-        "exprnd": "np.random.exponential", "random uniform": "np.random.rand", "sum": "np.sum",
+        "exprnd": "np.random.exponential", "random uniform": "functions.random_uniform",
+        "sum": "np.sum",
         "arccos": "np.arccos", "arcsin": "np.arcsin", "arctan": "np.arctan",
         "if then else": "functions.if_then_else", "step": "functions.step", "modulo": "np.mod",
         "pulse": "functions.pulse", "pulse train": "functions.pulse_train",
@@ -379,16 +382,6 @@ def parse_general_expression(element, namespace=None, subscript_dict=None):
         # vector functions
         "vmin": "np.min", "vmax": "np.max", "prod": "np.prod"
     }
-
-    builtins = {"time": ("time", [{'kind': 'component',
-                                   'subs': None,
-                                   'doc': 'The time of the model',
-                                   'py_name': 'time',
-                                   'real_name': 'Time',
-                                   'unit': None,
-                                   'py_expr': '_t',
-                                   'arguments': ''}])
-                }
 
     builders = {
         "integ": lambda expr, init: builder.add_stock(element['py_name'], element['subs'],
@@ -419,6 +412,7 @@ def parse_general_expression(element, namespace=None, subscript_dict=None):
                                                                             init, order,
                                                                             element['subs'],
                                                                             subscript_dict),
+        "initial": lambda initial_input: builder.add_initial(initial_input)
     }
 
     in_ops = {
@@ -438,15 +432,22 @@ def parse_general_expression(element, namespace=None, subscript_dict=None):
     ids_list = [re.escape(x) for x in namespace.keys()] or ['\\a']
     in_ops_list = [re.escape(x) for x in in_ops.keys()]
     pre_ops_list = [re.escape(x) for x in pre_ops.keys()]
+    if macro_list is not None and len(macro_list) > 0:
+        macro_names_list = [x['name'] for x in macro_list]
+    else:
+        macro_names_list = ['\\a']
 
     expression_grammar = r"""
     expr_type = array / expr
-    expr = _ pre_oper? _ (lookup_def / build_call / call / parens / number / reference / builtin) _ (in_oper _ expr)?
+    expr = _ pre_oper? _ (lookup_def / build_call / macro_call / call / parens / number / reference) _ (in_oper _ expr)?
 
-    lookup_def = ~r"(WITH\ LOOKUP)"I _ "(" _ reference _ "," _ "(" _ ( "(" _ number _ "," _ number _ ")" ","? _ )+ _ ")" _ ")"
-    call = (func / id) _ "(" _ (expr _ ","? _)* ")" # allows calls with no arguments
-    build_call = builder _ "(" _ (expr _ ","? _)* ")" # allows calls with no arguments
+    lookup_def = ~r"(WITH\ LOOKUP)"I _ "(" _ reference _ "," _ "(" _  ("[" ~r"[^\]]*" "]" _ ",")?  ( "(" _ expr _ "," _ expr _ ")" ","? _ )+ _ ")" _ ")"
+    call = (func / id) _ "(" _ (expr _ ","? _)* ")"  # these don't need their args parsed...
+    build_call = builder _ "(" _ arguments _ ")"
+    macro_call = macro _ "(" _ arguments _ ")"
     parens   = "(" _ expr _ ")"
+
+    arguments = (expr _ ","? _)*
 
     reference = id _ subscript_list?
     subscript_list = "[" _ ((sub_name / sub_element) _ ","? _)+ "]"
@@ -462,7 +463,7 @@ def parse_general_expression(element, namespace=None, subscript_dict=None):
     in_oper = ~r"(%(in_ops)s)"I  # infix operators (case insensitive)
     pre_oper = ~r"(%(pre_ops)s)"I  # prefix operators (case insensitive)
     builder = ~r"(%(builders)s)"I  # builder functions (case insensitive)
-    builtin = ~r"(%(builtins)s)"I  # build in functions (case insensitive)
+    macro = ~r"(%(macros)s)"I  # macros from model file (if none, use non-printable character)
 
     _ = ~r"[\s\\]*"  # whitespace character
     """ % {
@@ -475,7 +476,7 @@ def parse_general_expression(element, namespace=None, subscript_dict=None):
         'in_ops': '|'.join(reversed(sorted(in_ops_list, key=len))),
         'pre_ops': '|'.join(reversed(sorted(pre_ops_list, key=len))),
         'builders': '|'.join(reversed(sorted(builders.keys(), key=len))),
-        'builtins': '|'.join(reversed(sorted(builtins.keys(), key=len)))
+        'macros': '|'.join(reversed(sorted(macro_names_list, key=len)))
     }
 
     parser = parsimonious.Grammar(expression_grammar)
@@ -518,24 +519,16 @@ def parse_general_expression(element, namespace=None, subscript_dict=None):
         def visit_id(self, n, vc):
             return namespace[n.text]
 
-        def visit_builtin(self, n, vc):
-            # these are model elements that are not functions, but exist implicitly within the
-            # vensim model
-            self.kind = 'component'
-            name, structure = builtins[n.text.lower()]
-            self.new_structure += structure
-            return name + '()'
-
         def visit_lookup_def(self, n, vc):
             """ This exists because vensim has multiple ways of doing lookups.
             Which is frustrating."""
-            x = vc[4]
-            pairs = vc[10]
+            x_val = vc[4]
+            pairs = vc[11]
             mixed_list = pairs.replace('(', '').replace(')', '').split(',')
             xs = mixed_list[::2]
             ys = mixed_list[1::2]
             string = "functions.lookup(%(x)s, [%(xs)s], [%(ys)s])" % {
-                'x': x,
+                'x': x_val,
                 'xs': ','.join(xs),
                 'ys': ','.join(ys)
             }
@@ -563,7 +556,8 @@ def parse_general_expression(element, namespace=None, subscript_dict=None):
             else:
                 return n.text.replace(' ', '')
 
-        def visit_subscript_list(self, n, (lb, _1, refs, rb)):
+        def visit_subscript_list(self, n, vc):
+            refs = vc[2]
             subs = [x.strip() for x in refs.split(',')]
             coordinates = utils.make_coord_dict(subs, subscript_dict)
             if len(coordinates):
@@ -573,14 +567,29 @@ def parse_general_expression(element, namespace=None, subscript_dict=None):
 
         def visit_build_call(self, n, vc):
             call = vc[0]
-            args = vc[4]
+            arglist = vc[4]
             self.kind = 'component'
-            arglist = [x.strip() for x in args.split(',')]
             name, structure = builders[call.strip().lower()](*arglist)
             self.new_structure += structure
             return name
 
+        def visit_macro_call(self, n, vc):
+            call = vc[0]
+            arglist = vc[4]
+            self.kind = 'component'
+            py_name = utils.make_python_identifier(call)[0]
+            macro = [x for x in macro_list if x['py_name'] == py_name][0]  # should match once
+            name, structure = builder.add_macro(macro['py_name'], macro['file_name'],
+                                                macro['params'], arglist)
+            self.new_structure += structure
+            return name
+
+        def visit_arguments(self, n, vc):
+            arglist = [x.strip(',') for x in vc]
+            return arglist
+
         def visit__(self, n, vc):
+            """ Handles whitespace characters"""
             return ''
 
         def generic_visit(self, n, vc):
@@ -595,6 +604,7 @@ def parse_general_expression(element, namespace=None, subscript_dict=None):
 
 
 def parse_lookup_expression(element):
+    """ This syntax parses lookups that are defined with their own element """
 
     lookup_grammar = r"""
     lookup = _ "(" _ "[" ~r"[^\]]*" "]" _ "," _ ( "(" _ number _ "," _ number _ ")" ","? _ )+ ")"
@@ -611,8 +621,9 @@ def parse_lookup_expression(element):
             self.visit(ast)
 
         def visit__(self, n, vc):
-            "remove whitespace"
+            # remove whitespace
             return ''
+
         def visit_lookup(self, n, vc):
             pairs = vc[9]
             mixed_list = pairs.replace('(', '').replace(')', '').split(',')
@@ -630,6 +641,63 @@ def parse_lookup_expression(element):
     parse_object = LookupParser(tree)
     return {'py_expr': parse_object.translation,
             'arguments': 'x'}
+
+
+def translate_section(section, macro_list):
+    model_elements = get_model_elements(section['string'])
+
+    # extract equation components
+    model_docstring = ''
+    for entry in model_elements:
+        if entry['kind'] == 'entry':
+            entry.update(get_equation_components(entry['eqn']))
+        elif entry['kind'] == 'section':
+            model_docstring += entry['doc']
+
+    # make python identifiers and track for namespace conflicts
+    namespace = {'TIME': 'time', 'Time': 'time'}  # Initialize with builtins
+    # add macro parameters when parsing a macro section
+    for param in section['params']:
+        name, namespace = utils.make_python_identifier(param, namespace)
+
+    # add macro functions to namespace
+    for macro in macro_list:
+        if macro['name'] is not '_main_':
+            name, namespace = utils.make_python_identifier(macro['name'], namespace)
+
+    # add model elements
+    for element in model_elements:
+        if element['kind'] not in ['subdef', 'section']:
+            element['py_name'], namespace = utils.make_python_identifier(element['real_name'],
+                                                                         namespace)
+
+    # Create a namespace for the subscripts
+    # as these aren't used to create actual python functions, but are just labels on arrays,
+    # they don't actually need to be python-safe
+    subscript_dict = {e['real_name']: e['subs'] for e in model_elements if e['kind'] == 'subdef'}
+
+    # Parse components to python syntax.
+    for element in model_elements:
+        if element['kind'] == 'component' and 'py_expr' not in element:
+            # Todo: if there is new structure, it should be added to the namespace...
+            translation, new_structure = parse_general_expression(element,
+                                                                  namespace=namespace,
+                                                                  subscript_dict=subscript_dict,
+                                                                  macro_list=macro_list)
+            element.update(translation)
+            model_elements += new_structure
+
+        elif element['kind'] == 'lookup':
+            element.update(parse_lookup_expression(element))
+
+    # send the pieces to be built
+    build_elements = [e for e in model_elements if e['kind'] not in ['subdef', 'section']]
+    builder.build(build_elements,
+                  subscript_dict,
+                  namespace,
+                  section['file_name'])
+
+    return section['file_name']
 
 
 def translate_vensim(mdl_file):
@@ -654,61 +722,27 @@ def translate_vensim(mdl_file):
     #>>> translate_vensim('../../tests/test-models/tests/limits/test_limits.mdl')
 
     """
-    # Todo: work out what to do with subranges
-    # Todo: parse units string
-    # Todo: handle macros
-
     with open(mdl_file, 'rU') as in_file:
         text = in_file.read()
 
-    # extract model elements
-    model_elements = []
-    file_sections = get_file_sections(text.replace('\n', ''))
-    for section in file_sections:
-        if section['name'] == 'main':
-            model_elements += get_model_elements(section['string'])
-
-    # extract equation components
-    model_docstring = ''
-    for entry in model_elements:
-        if entry['kind'] == 'entry':
-            entry.update(get_equation_components(entry['eqn']))
-        elif entry['kind'] == 'section':
-            model_docstring += entry['doc']
-
-    # make python identifiers and track for namespace conflicts
-    namespace = {}
-    for element in model_elements:
-        if element['kind'] not in ['subdef', 'section']:
-            element['py_name'], namespace = utils.make_python_identifier(element['real_name'],
-                                                                           namespace)
-
-    # Create a namespace for the subscripts
-    # as these aren't used to create actual python functions, but are just labels on arrays,
-    # they don't actually need to be python-safe
-    subscript_dict = {e['real_name']: e['subs'] for e in model_elements if e['kind'] == 'subdef'}
-
-    # Parse components to python syntax.
-    for element in model_elements:
-        if element['kind'] == 'component' and 'py_expr' not in element:
-            translation, new_structure = parse_general_expression(element,
-                                                                  namespace=namespace,
-                                                                  subscript_dict=subscript_dict,
-                                                                  )
-            element.update(translation)
-            model_elements += new_structure
-
-        elif element['kind'] == 'lookup':
-            element.update(parse_lookup_expression(element))
-
-    # define outfile name
     outfile_name = mdl_file.replace('.mdl', '.py')
+    out_dir = os.path.dirname(outfile_name)
 
-    # send the pieces to be built
-    build_elements = [e for e in model_elements if e['kind'] not in ['subdef', 'section']]
-    builder.build(build_elements,
-                  subscript_dict,
-                  namespace,
-                  outfile_name)
+    # extract model elements
+    file_sections = get_file_sections(text.replace('\n', ''))
+    # Todo: build up a representation of macros including parameters, filenames, that can be passed
+    # to the various builders.
+    for section in file_sections:
+        if section['name'] == '_main_':
+            # define outfile name
+            section['file_name'] = outfile_name
+        else:
+            section['py_name'] = utils.make_python_identifier(section['name'])[0]
+            section['file_name'] = out_dir + '/' + section['py_name'] + '.py'
+
+    macro_list = [s for s in file_sections if s['name'] is not '_main_']
+
+    for section in file_sections:
+        translate_section(section, macro_list)
 
     return outfile_name

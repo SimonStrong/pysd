@@ -30,7 +30,7 @@ def dict_find(in_dict, value):
     """
     # Todo: make this robust to repeated values
     # Todo: make this robust to missing values
-    return in_dict.keys()[in_dict.values().index(value)]
+    return list(in_dict.keys())[list(in_dict.values()).index(value)]
 
 
 def xrmerge(das, accept_new=True):
@@ -87,7 +87,7 @@ def find_subscript_name(subscript_dict, element):
     if element in subscript_dict.keys():
         return element
 
-    for name, elements in subscript_dict.iteritems():
+    for name, elements in subscript_dict.items():
         if element in elements:
             return name
 
@@ -101,17 +101,26 @@ def make_coord_dict(subs, subscript_dict, terse=True):
 
     Parameters
     ----------
-    subs
-    subscript_dict
+    subs: list of strings
+        coordinates, either as names of dimensions, or positions within a dimension
+    subscript_dict: dict
+        the full dictionary of subscript names and values
+    terse: Binary Flag
+        - If true, includes only elements that do not cover the full range of values in their
+          respective dimension
+        - If false, returns all dimensions
 
     Returns
     -------
+    coordinates: dictionary
+        Coordinates needed to access the xarray quantities we're interested in.
 
     Examples
     --------
-    >>> make_coord_dict(['Dim1', 'D'], {'Dim1':['A','B','C'], 'Dim2':['D', 'E', 'F']})
+    >>> make_coord_dict(['Dim1', 'D'], {'Dim1': ['A', 'B', 'C'], 'Dim2': ['D', 'E', 'F']})
     {'Dim2': ['D']}
-    >>> make_coord_dict(['Dim1', 'D'], {'Dim1':['A','B','C'], 'Dim2':['D', 'E', 'F']}, terse=False)
+    >>> make_coord_dict(['Dim1', 'D'], {'Dim1': ['A', 'B', 'C'], 'Dim2':['D', 'E', 'F']},
+    >>>                 terse=False)
     {'Dim2': ['D'], 'Dim1': ['A', 'B', 'C']}
     """
     sub_elems_list = [y for x in subscript_dict.values() for y in x]
@@ -208,18 +217,19 @@ def make_python_identifier(string, namespace=None, reserved_words=None,
     ('abc', {'123abc': 'abc'})
 
     already in namespace
-    >>> make_python_identifier('Variable$', namespace={'Variable$':'variable'})
+    >>> make_python_identifier('Variable$', namespace={'Variable$': 'variable'})
     ('variable', {'Variable$': 'variable'})
 
     namespace conflicts
-    >>> make_python_identifier('Variable$', namespace={'Variable@':'variable'})
+    >>> make_python_identifier('Variable$', namespace={'Variable@': 'variable'})
     ('variable_1', {'Variable@': 'variable', 'Variable$': 'variable_1'})
 
-    >>> make_python_identifier('Variable$', namespace={'Variable@':'variable', 'Variable%':'variable_1'})
+    >>> make_python_identifier('Variable$', namespace={'Variable@': 'variable',
+    >>>                                                'Variable%': 'variable_1'})
     ('variable_2', {'Variable@': 'variable', 'Variable%': 'variable_1', 'Variable$': 'variable_2'})
 
     throw exception instead
-    >>> make_python_identifier('Variable$', namespace={'Variable@':'variable'}, handle='throw')
+    >>> make_python_identifier('Variable$', namespace={'Variable@': 'variable'}, handle='throw')
     Traceback (most recent call last):
      ...
     NameError: variable already exists in namespace or is a reserved word
@@ -302,7 +312,7 @@ def get_return_elements(return_columns, namespace, subscript_dict):
 
     """
     # Todo: clean up duplicated code
-    capture_elements = set()
+    capture_elements = list()
     return_addresses = dict()
     for col in return_columns:
         if '[' in col:
@@ -316,7 +326,8 @@ def get_return_elements(return_columns, namespace, subscript_dict):
                 else:
                     raise KeyError(name + " not found as model element")
 
-            capture_elements.add(py_name)
+            if py_name not in capture_elements:
+                capture_elements += [py_name]
             address = make_coord_dict(subs, subscript_dict)
             return_addresses[col] = (py_name, address)
         else:
@@ -328,7 +339,8 @@ def get_return_elements(return_columns, namespace, subscript_dict):
                 else:
                     raise KeyError(col + " not found as model element")
 
-            capture_elements.add(py_name)
+            if py_name not in capture_elements:
+                capture_elements += [py_name]
             return_addresses[col] = (py_name, {})
 
     return list(capture_elements), return_addresses
@@ -356,7 +368,7 @@ def make_flat_df(frames, return_addresses):
     """
 
     # Todo: could also try a list comprehension here, or parallel apply
-    visited = map(lambda x: visit_addresses(x, return_addresses), frames)
+    visited = list(map(lambda x: visit_addresses(x, return_addresses), frames))
     return pd.DataFrame(visited)
 
 
@@ -381,7 +393,7 @@ def visit_addresses(frame, return_addresses):
 
     """
     outdict = dict()
-    for real_name, (pyname, address) in return_addresses.iteritems():
+    for real_name, (pyname, address) in return_addresses.items():
         if address:
             xrval = frame[pyname].loc[address]
             if xrval.size > 1:
